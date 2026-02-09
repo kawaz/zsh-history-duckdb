@@ -1,0 +1,139 @@
+#!/bin/bash
+# zsh-history-duckdb: DuckDB履歴の検索・管理コマンド
+
+set -euo pipefail
+
+DB="${ZSH_HISTORY_DUCKDB:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-history/zsh-history.duckdb}"
+PARQUET_DIR="${ZSH_HISTORY_PARQUET:-${DB%/*}/parquet}"
+
+duckdb_query() {
+  duckdb -init /dev/null "$DB" -noheader -list "$@"
+}
+
+duckdb_query_ro() {
+  duckdb -init /dev/null -readonly "$DB" -noheader -list "$@"
+}
+
+# parquet を含む全履歴をクエリ（読み取り専用、一時DB使用）
+duckdb_query_all() {
+  local parquet_union=""
+  if [[ -d $PARQUET_DIR ]] && ls "$PARQUET_DIR"/*.parquet &>/dev/null; then
+    parquet_union="UNION ALL SELECT * FROM read_parquet('$PARQUET_DIR/*.parquet')"
+  fi
+  duckdb -init /dev/null -readonly "$DB" -noheader -list "$@" <<SQL
+CREATE OR REPLACE TEMP VIEW all_history AS
+  SELECT * FROM history
+  $parquet_union;
+$(cat)
+SQL
+}
+
+cmd_list() {
+  local pwd_filter=${1:-}
+  local where_clause=""
+  [[ -n $pwd_filter ]] && where_clause="WHERE pwd LIKE getenv('_H_PWD') || '%'"
+  _H_PWD=$pwd_filter duckdb_query_all -separator ' ' <<SQL
+SELECT
+  arg_max(id, ts) as id,
+  strftime(max(ts), '%Y-%m-%dT%H:%M:%S'),
+  CASE WHEN arg_max(status, ts) = 0 THEN '✅' WHEN arg_max(status, ts) IS NULL THEN '⏳' ELSE '❌' END,
+  replace(command, chr(10), ' ↵ ')
+FROM all_history
+$where_clause
+GROUP BY command
+ORDER BY max(ts) DESC
+LIMIT 10000;
+SQL
+}
+
+cmd_preview() {
+  local id=$1
+  _H_ID=$id duckdb_query_all <<'SQL'
+SELECT
+  '      ID: ' || id || CASE WHEN id NOT IN (SELECT id FROM history) THEN ' (archived)' ELSE '' END || chr(10) ||
+  '     PID: ' || pid || chr(10) ||
+  '    PPID: ' || ppid || chr(10) ||
+  '     TTY: ' || tty || chr(10) ||
+  '    Time: ' || strftime(ts, '%Y-%m-%d %H:%M:%S') || chr(10) ||
+  '     PWD: ' || pwd || chr(10) ||
+  'Duration: ' || coalesce(format('{:,.0f}', duration * 1000) || ' ms', 'running...') || chr(10) ||
+  '  Status: ' || coalesce(status, 'running') || chr(10) ||
+  chr(10) || command
+FROM all_history
+WHERE id = getenv('_H_ID')::INTEGER
+ORDER BY ts DESC
+LIMIT 1;
+SQL
+}
+
+cmd_delete() {
+  local id=$1
+  # DuckDB にあれば削除、なければアーカイブ済みなので削除不可
+  local exists=$(_H_ID=$id duckdb_query_ro <<<"SELECT count(*) FROM history WHERE id = getenv('_H_ID')::INTEGER;")
+  if [[ $exists -gt 0 ]]; then
+    _H_ID=$id duckdb_query <<<"DELETE FROM history WHERE id = getenv('_H_ID')::INTEGER;"
+    echo "Deleted: $id" >&2
+  else
+    echo "Cannot delete archived entry: $id" >&2
+  fi
+}
+
+cmd_search() {
+  local self=$0
+  local cols=${COLUMNS:-$(tput cols)}
+
+  # プレビュー位置（環境変数で状態管理、初期値は画面幅で決定）
+  local preview_pos=${_ZSH_HIST_PREVIEW:-}
+  if [[ -z $preview_pos ]]; then
+    (( cols > 120 )) && preview_pos="right" || preview_pos="up"
+  fi
+  local preview_opt="$preview_pos:50%:wrap"
+  [[ $preview_pos == "hidden" ]] && preview_opt="hidden"
+
+  # ヘッダー
+  local header="C-d:delete  C-f:pwd  C-p:preview"
+  [[ -n ${_ZSH_HIST_PWD_FILTER:-} ]] && header="C-d:delete  C-f:pwd[ON]  C-p:preview"
+
+  local selected
+  selected=$(cmd_list "${_ZSH_HIST_PWD_FILTER:-}" | fzf --with-nth=2.. --delimiter=' ' \
+    --query "${FZF_QUERY:-}" \
+    --preview "$self preview {1}" \
+    --preview-window="$preview_opt" \
+    --bind "ctrl-d:execute-silent($self delete {1})+reload($self list ${_ZSH_HIST_PWD_FILTER:-})" \
+    --bind "ctrl-f:become:$self search-toggle-pwd" \
+    --bind "ctrl-p:become:$self search-toggle-preview" \
+    --header "$header" \
+    --no-mouse \
+    --tiebreak=index \
+  ) || return 0
+
+  local id=${selected%% *}
+  [[ -z $id ]] && return
+  _H_ID=$id duckdb_query_all <<<"SELECT command FROM all_history WHERE id = getenv('_H_ID')::INTEGER ORDER BY ts DESC LIMIT 1;"
+}
+
+cmd_search_toggle_pwd() {
+  if [[ -n ${_ZSH_HIST_PWD_FILTER:-} ]]; then
+    unset _ZSH_HIST_PWD_FILTER
+  else
+    export _ZSH_HIST_PWD_FILTER=$PWD
+  fi
+  exec "$0" search
+}
+
+cmd_search_toggle_preview() {
+  # right -> up -> hidden -> right (初期状態は right 扱い)
+  local -A next=([right]=up [up]=hidden [hidden]=right)
+  export _ZSH_HIST_PREVIEW=${next[${_ZSH_HIST_PREVIEW:-right}]}
+  exec "$0" search
+}
+
+case ${1:-search} in
+  list)                 cmd_list "$2" ;;
+  preview)              cmd_preview "$2" ;;
+  delete)               cmd_delete "$2" ;;
+  search-toggle-pwd)    cmd_search_toggle_pwd ;;
+  search-toggle-preview) cmd_search_toggle_preview ;;
+  search)               cmd_search ;;
+  *)                    echo "Usage: $0 {list|preview|delete|search}" >&2; exit 1 ;;
+esac
