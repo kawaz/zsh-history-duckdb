@@ -18,7 +18,6 @@ Zsh plugin that records command history in [DuckDB](https://duckdb.org/), automa
 
 - [duckdb](https://duckdb.org/)
 - [fzf](https://github.com/junegunn/fzf)
-- bash (used by the search helper script)
 
 ## Installation
 
@@ -37,11 +36,8 @@ zinit light kawaz/zsh-history-duckdb
 
 ### sheldon
 
-Add to `~/.config/sheldon/plugins.toml`:
-
-```toml
-[plugins.zsh-history-duckdb]
-github = "kawaz/zsh-history-duckdb"
+```bash
+sheldon add zsh-history-duckdb --github kawaz/zsh-history-duckdb
 ```
 
 ### Nix home-manager

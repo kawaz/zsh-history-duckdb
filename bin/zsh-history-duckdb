@@ -1,7 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env zsh
 # zsh-history-duckdb: DuckDB履歴の検索・管理コマンド
 
-set -euo pipefail
+emulate -L zsh
+setopt no_unset pipe_fail err_return
+
+# Design rationale: zshの関数内では$0が関数名になるため、
+# スクリプト冒頭（関数の外）で絶対パスを保存しておく
+SELF=${0:a}
 
 DB="${ZSH_HISTORY_DUCKDB:-${XDG_CACHE_HOME:-$HOME/.cache}/zsh-history/zsh-history.duckdb}"
 PARQUET_DIR="${ZSH_HISTORY_PARQUET:-${DB%/*}/parquet}"
@@ -17,7 +22,8 @@ duckdb_query_ro() {
 # parquet を含む全履歴をクエリ（読み取り専用、一時DB使用）
 duckdb_query_all() {
   local parquet_union=""
-  if [[ -d $PARQUET_DIR ]] && ls "$PARQUET_DIR"/*.parquet &>/dev/null; then
+  # Design rationale: (N) glob qualifier でマッチなし時にエラーではなく空展開にする
+  if [[ -d $PARQUET_DIR ]] && (){ (( $# > 0 )) } $PARQUET_DIR/*.parquet(N); then
     parquet_union="UNION ALL SELECT * FROM read_parquet('$PARQUET_DIR/*.parquet')"
   fi
   duckdb -init /dev/null -readonly "$DB" -noheader -list "$@" <<SQL
@@ -70,16 +76,15 @@ cmd_delete() {
   local id=$1
   # DuckDB にあれば削除、なければアーカイブ済みなので削除不可
   local exists=$(_H_ID=$id duckdb_query_ro <<<"SELECT count(*) FROM history WHERE id = getenv('_H_ID')::INTEGER;")
-  if [[ $exists -gt 0 ]]; then
+  if (( exists > 0 )); then
     _H_ID=$id duckdb_query <<<"DELETE FROM history WHERE id = getenv('_H_ID')::INTEGER;"
-    echo "Deleted: $id" >&2
+    print -u2 "Deleted: $id"
   else
-    echo "Cannot delete archived entry: $id" >&2
+    print -u2 "Cannot delete archived entry: $id"
   fi
 }
 
 cmd_search() {
-  local self=$0
   local cols=${COLUMNS:-$(tput cols)}
 
   # プレビュー位置（環境変数で状態管理、初期値は画面幅で決定）
@@ -97,11 +102,11 @@ cmd_search() {
   local selected
   selected=$(cmd_list "${_ZSH_HIST_PWD_FILTER:-}" | fzf --with-nth=2.. --delimiter=' ' \
     --query "${FZF_QUERY:-}" \
-    --preview "$self preview {1}" \
+    --preview "$SELF preview {1}" \
     --preview-window="$preview_opt" \
-    --bind "ctrl-d:execute-silent($self delete {1})+reload($self list ${_ZSH_HIST_PWD_FILTER:-})" \
-    --bind "ctrl-f:become:$self search-toggle-pwd" \
-    --bind "ctrl-p:become:$self search-toggle-preview" \
+    --bind "ctrl-d:execute-silent($SELF delete {1})+reload($SELF list ${_ZSH_HIST_PWD_FILTER:-})" \
+    --bind "ctrl-f:become:$SELF search-toggle-pwd" \
+    --bind "ctrl-p:become:$SELF search-toggle-preview" \
     --header "$header" \
     --no-mouse \
     --tiebreak=index \
@@ -119,14 +124,14 @@ cmd_search_toggle_pwd() {
   else
     export _ZSH_HIST_PWD_FILTER=$PWD
   fi
-  exec "$0" search
+  exec "$SELF" search
 }
 
 cmd_search_toggle_preview() {
   # right -> up -> hidden -> right (初期状態は right 扱い)
-  local -A next=([right]=up [up]=hidden [hidden]=right)
+  local -A next=(right up up hidden hidden right)
   export _ZSH_HIST_PREVIEW=${next[${_ZSH_HIST_PREVIEW:-right}]}
-  exec "$0" search
+  exec "$SELF" search
 }
 
 case ${1:-search} in
@@ -136,5 +141,5 @@ case ${1:-search} in
   search-toggle-pwd)    cmd_search_toggle_pwd ;;
   search-toggle-preview) cmd_search_toggle_preview ;;
   search)               cmd_search ;;
-  *)                    echo "Usage: $0 {list|preview|delete|search}" >&2; exit 1 ;;
+  *)                    print -u2 "Usage: $SELF {list|preview|delete|search}"; exit 1 ;;
 esac
