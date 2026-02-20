@@ -105,6 +105,7 @@ cmd_search() {
     --header "$header" \
     --no-mouse \
     --tiebreak=index \
+    --no-hscroll \
   ) || return 0
 
   local id=${selected%% *}
