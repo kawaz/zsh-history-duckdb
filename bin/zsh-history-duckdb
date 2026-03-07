@@ -109,7 +109,7 @@ cmd_search() {
     --bind "ctrl-p:become:$SELF search-toggle-preview" \
     --header "$header" \
     --no-mouse \
-    --tiebreak=index \
+    --no-sort \
     --no-hscroll \
   ) || return 0
 
